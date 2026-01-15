@@ -1,22 +1,48 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import os
 import matplotlib.pyplot as plt
+from datetime import datetime
+import pandas_market_calendars as mcal
 
-# -------------------------
+# =======================
 # CONFIG
-# -------------------------
+# =======================
 TOP_N = 10
-LOOKBACK = 60          # indicator lookback
-HOLD_DAYS = 21         # 1 month hold
-TRAIN_DAYS = 252       # ~12 months training window
-TEST_DAYS = 63         # ~3 months test window
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-UNIVERSE_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+# =======================
+# Market day check (NSE)
+# =======================
+def is_trading_day():
+    nse = mcal.get_calendar("NSE")
+    today = datetime.now().date()
+    schedule = nse.schedule(start_date=today, end_date=today)
+    return not schedule.empty
 
-# -------------------------
+if not is_trading_day():
+    print("Market closed today. Exiting.")
+    exit()
+
+# =======================
+# Telegram helpers
+# =======================
+def send_text(msg):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+
+def send_photo(path, caption=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    with open(path, "rb") as img:
+        requests.post(url, files={"photo": img},
+                      data={"chat_id": CHAT_ID, "caption": caption})
+
+# =======================
 # RSI
-# -------------------------
+# =======================
 def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -24,140 +50,103 @@ def rsi(series, period=14):
     rs = gain.rolling(period).mean() / loss.rolling(period).mean()
     return 100 - (100 / (1 + rs))
 
-# -------------------------
-# Load universe
-# -------------------------
-symbols = pd.read_csv(UNIVERSE_URL)["Symbol"].tolist()
+# =======================
+# Load Nifty 500
+# =======================
+url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+symbols = pd.read_csv(url)["Symbol"].tolist()
 symbols = [s + ".NS" for s in symbols]
 
-print(f"Universe: {len(symbols)} stocks")
+print(f"Scanning {len(symbols)} stocks...")
 
-# -------------------------
-# Download 3 years of data
-# -------------------------
-print("Downloading price data...")
-data = yf.download(symbols, period="3y", group_by="ticker", progress=False)
-nifty = yf.download("^NSEI", period="3y", progress=False)["Close"]
+# Download Nifty index for relative strength
+nifty = yf.download("^NSEI", period="6mo", progress=False)["Close"]
 
-dates = nifty.index
+results = []
 
-# -------------------------
-# Factor scoring function
-# -------------------------
-def score_stock(df, nifty_slice):
-    close = df["Close"]
-    volume = df["Volume"]
+# =======================
+# Scan all stocks
+# =======================
+for sym in symbols:
+    try:
+        df = yf.download(sym, period="6mo", progress=False)
 
-    if len(close) < 63:
-        return None
+        if df.empty or len(df) < 70:
+            continue
 
-    ret_1m = close.iloc[-1] / close.iloc[-21] - 1
-    ret_3m = close.iloc[-1] / close.iloc[-63] - 1
+        close = df["Close"]
+        volume = df["Volume"]
 
-    ma20 = close.rolling(20).mean().iloc[-1]
-    ma50 = close.rolling(50).mean().iloc[-1]
-    rsi_val = rsi(close).iloc[-1]
+        ret_1m = close.iloc[-1] / close.iloc[-21] - 1
+        ret_3m = close.iloc[-1] / close.iloc[-63] - 1
 
-    vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
 
-    rs_stock = close.iloc[-1] / close.iloc[-63]
-    rs_index = nifty_slice.iloc[-1] / nifty_slice.iloc[-63]
-    rel_strength = rs_stock / rs_index
+        rsi_val = rsi(close).iloc[-1]
 
-    # Filters (quality gate)
-    if not (close.iloc[-1] > ma20 > ma50):
-        return None
-    if not (45 < rsi_val < 65):
-        return None
-    if vol_ratio < 1.1:
-        return None
+        vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
 
-    volatility = close.pct_change().std()
+        # Relative strength vs Nifty
+        rs_stock = close.iloc[-1] / close.iloc[-63]
+        rs_index = nifty.iloc[-1] / nifty.iloc[-63]
+        rel_strength = rs_stock / rs_index
 
-    score = (
-        ret_1m * 0.4 +
-        ret_3m * 0.3 +
-        rel_strength * 0.2 -
-        volatility * 0.1
-    )
+        # Filters (quality gates)
+        if not (close.iloc[-1] > ma20 > ma50):
+            continue
+        if not (45 < rsi_val < 65):
+            continue
+        if vol_ratio < 1.1:
+            continue
 
-    return score
+        volatility = close.pct_change().std()
 
-# -------------------------
-# Walk-forward loop
-# -------------------------
-all_oos_returns = []
+        score = (
+            ret_1m * 0.4 +
+            ret_3m * 0.3 +
+            rel_strength * 0.2 -
+            volatility * 0.1
+        )
 
-print("Running walk-forward validation...")
+        results.append((sym.replace(".NS", ""), close.iloc[-1], score))
 
-for start in range(TRAIN_DAYS, len(dates) - TEST_DAYS - HOLD_DAYS, TEST_DAYS):
-    train_end = dates[start]
-    test_start = dates[start + 1]
-    test_end = dates[start + TEST_DAYS]
+    except:
+        continue
 
-    print(f"\nTrain end: {train_end.date()} | Test window: {test_start.date()} → {test_end.date()}")
+# =======================
+# Rank stocks
+# =======================
+df = pd.DataFrame(results, columns=["Stock", "Price", "Score"])
+df = df.sort_values(by="Score", ascending=False)
 
-    test_returns = []
+top = df.head(TOP_N)
 
-    for i in range(start + LOOKBACK, start + TEST_DAYS - HOLD_DAYS):
-        today = dates[i]
-        future = dates[i + HOLD_DAYS]
+# =======================
+# Send Telegram text
+# =======================
+today = datetime.now().strftime("%Y-%m-%d")
+msg = f"📊 Daily Stock Picks ({today})\n\n"
 
-        scores = []
+for i, row in enumerate(top.itertuples(), 1):
+    strength = "🟢 Strong" if row.Score > 0.25 else "🟡 Moderate"
+    msg += f"{i}. {row.Stock} ₹{round(row.Price,2)} | Score: {round(row.Score,3)} | {strength}\n"
 
-        nifty_slice = nifty.loc[:today]
+send_text(msg)
 
-        for sym in symbols:
-            try:
-                df = data[sym].loc[:today].dropna()
-                if len(df) < LOOKBACK:
-                    continue
+# =======================
+# Send charts for top 3
+# =======================
+for stock in top.head(3)["Stock"]:
+    df = yf.download(stock + ".NS", period="1mo", progress=False)
+    plt.figure()
+    plt.plot(df["Close"])
+    plt.title(stock)
+    plt.grid()
+    plt.tight_layout()
+    img_path = f"/tmp/{stock}.png"
+    plt.savefig(img_path)
+    plt.close()
+    send_photo(img_path, caption=f"{stock} – 1 Month Chart")
 
-                s = score_stock(df, nifty_slice)
-                if s is not None:
-                    scores.append((sym, s))
-            except:
-                continue
-
-        top = sorted(scores, key=lambda x: x[1], reverse=True)[:TOP_N]
-
-        rets = []
-        for sym, _ in top:
-            try:
-                p0 = data[sym].loc[today]["Close"]
-                p1 = data[sym].loc[future]["Close"]
-                rets.append((p1 / p0) - 1)
-            except:
-                continue
-
-        if rets:
-            test_returns.append(np.mean(rets))
-
-    if test_returns:
-        avg = np.mean(test_returns)
-        print(f"  OOS avg return: {avg*100:.2f}%")
-        all_oos_returns.extend(test_returns)
-
-# -------------------------
-# Final evaluation
-# -------------------------
-all_oos_returns = np.array(all_oos_returns)
-
-print("\n========== WALK-FORWARD RESULTS ==========")
-print(f"Total test periods: {len(all_oos_returns)}")
-print(f"Win rate: {(all_oos_returns > 0).mean()*100:.2f}%")
-print(f"Average return per period: {all_oos_returns.mean()*100:.2f}%")
-print(f"Best period: {all_oos_returns.max()*100:.2f}%")
-print(f"Worst period: {all_oos_returns.min()*100:.2f}%")
-
-# Equity curve
-equity = (1 + all_oos_returns).cumprod()
-
-plt.figure(figsize=(10,6))
-plt.plot(equity, label="Walk-forward Equity")
-plt.title("Out-of-sample Walk-forward Equity Curve")
-plt.xlabel("Test trades")
-plt.ylabel("Growth of 1 unit")
-plt.grid()
-plt.legend()
-plt.show()
+print("Done.")
