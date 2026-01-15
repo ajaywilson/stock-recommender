@@ -93,16 +93,16 @@ for sym in symbols:
         rel_strength = rs_stock / rs_index
 
         # -----------------------
-        # Relaxed filters (practical)
+        # Balanced filters (Option 2)
         # -----------------------
-        if close.iloc[-1] < ma20:
-            continue
+        if close.iloc[-1] < ma20 * 0.985:
+            continue # allow price slightly below 20DMA (~1.5%)
 
-        if rsi_val < 40 or rsi_val > 70:
-            continue
+        if rsi_val < 35 or rsi_val > 75:
+            continue # wider RSI window
 
-        if vol_ratio < 0.9:
-            continue
+        if vol_ratio < 0.8:
+            continue # allow lower volume but avoid dead stocks
 
         volatility = close.pct_change().std()
 
@@ -162,3 +162,4 @@ for stock in top.head(3)["Stock"]:
     send_photo(img_path, caption=f"{stock} – 1 Month Chart")
 
 print("Done.")
+
