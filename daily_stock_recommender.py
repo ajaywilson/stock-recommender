@@ -59,7 +59,7 @@ nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close
 results = []
 
 # =======================
-# Scan stocks
+# Scan stocks with trend + candlestick + volume confirmation
 # =======================
 for sym in symbols:
     try:
@@ -68,8 +68,34 @@ for sym in symbols:
         if df.empty or len(df) < 70:
             continue
 
+        open_ = df["Open"]
+        high = df["High"]
+        low = df["Low"]
         close = df["Close"]
+        volume = df["Volume"]
 
+        # ---------- Trend ----------
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+
+        if close.iloc[-1] < ma50:
+            continue
+        if ma20 < ma50:
+            continue
+
+        # ---------- Candlestick ----------
+        bullish = close.iloc[-1] > open_.iloc[-1]
+        close_near_high = (high.iloc[-1] - close.iloc[-1]) / (high.iloc[-1] - low.iloc[-1] + 1e-6) < 0.3
+
+        if not bullish or not close_near_high:
+            continue
+
+        # ---------- Volume ----------
+        avg_vol = volume.rolling(20).mean().iloc[-1]
+        if volume.iloc[-1] < 1.2 * avg_vol:
+            continue
+
+        # ---------- Momentum factors ----------
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -97,18 +123,15 @@ df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn"])
 df = df.dropna()
 
 if df.empty:
-    send_text("⚠️ No valid data today.")
+    send_text("⚠️ No stocks passed trend + candlestick + volume filters today.")
     exit()
 
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Message with strength labels
+# Strength label
 # =======================
-today = datetime.now().strftime("%Y-%m-%d")
-msg = f"📊 Daily Stock Picks ({today})\n\n"
-
 def label(score):
     if score >= 0.45:
         return "🟢 Strong"
@@ -117,43 +140,40 @@ def label(score):
     else:
         return "🔴 Weak"
 
+# =======================
+# Message
+# =======================
+today = datetime.now().strftime("%Y-%m-%d")
+msg = f"📊 Daily Stock Picks ({today})\n\n"
+
 for i, row in enumerate(top.itertuples(), 1):
     msg += (
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
-        f"Score {round(row.Score,3)} | "
-        f"{label(row.Score)} | "
+        f"Score {round(row.Score,3)} | {label(row.Score)} | "
         f"Exp 1M: {round(row.ExpReturn,2)}%\n"
     )
 
 # =======================
-# Improved allocation logic (aggressive capital usage)
+# Allocation logic (aggressive use of capital)
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
 MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
-PRICE_LIMIT = TOTAL_CAPITAL  # allow any price <= total capital
 
-alloc = top[top["Price"] <= PRICE_LIMIT].copy()
-
-if alloc.empty:
-    msg += "No affordable stocks for current capital."
-    send_text(msg)
-    exit()
-
-# Initialize 1 share of as many top stocks as possible
+alloc = top.copy()
 alloc["shares"] = 0
 alloc["invested"] = 0.0
 
 remaining = TOTAL_CAPITAL
 
-# First pass: give 1 share to top-ranked affordable stocks
+# First pass: 1 share each
 for i, row in alloc.iterrows():
     if remaining >= row["Price"]:
         alloc.loc[i, "shares"] = 1
         alloc.loc[i, "invested"] = row["Price"]
         remaining -= row["Price"]
 
-# Second pass: greedy buying by score until money exhausted
+# Second pass: greedy buying
 alloc = alloc.sort_values(by="Score", ascending=False)
 
 while True:
@@ -169,19 +189,18 @@ while True:
 
 alloc = alloc[alloc["shares"] > 0]
 
-# Print allocation
 for row in alloc.itertuples():
     msg += f"{row.Stock} – Buy {row.shares} shares (₹{int(row.invested)})\n"
 
 msg += f"\nRemaining cash: ₹{int(remaining)}"
 
 # =======================
-# Portfolio expectation
+# Portfolio expected value
 # =======================
 future_val = 0
 for row in alloc.itertuples():
-    stock_exp = top[top["Stock"] == row.Stock]["ExpReturn"].values[0]
-    future_val += row.invested * (1 + stock_exp / 100)
+    exp_ret = top[top["Stock"] == row.Stock]["ExpReturn"].values[0]
+    future_val += row.invested * (1 + exp_ret / 100)
 
 future_val += remaining
 gain = future_val - TOTAL_CAPITAL
