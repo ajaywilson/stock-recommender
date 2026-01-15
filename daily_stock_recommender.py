@@ -92,12 +92,16 @@ for sym in symbols:
         rs_index = nifty.iloc[-1] / nifty.iloc[-63]
         rel_strength = rs_stock / rs_index
 
-        # Filters (quality gates)
-        if not (close.iloc[-1] > ma20 > ma50):
+        # -----------------------
+        # Relaxed filters (practical)
+        # -----------------------
+        if close.iloc[-1] < ma20:
             continue
-        if not (45 < rsi_val < 65):
+
+        if rsi_val < 40 or rsi_val > 70:
             continue
-        if vol_ratio < 1.1:
+
+        if vol_ratio < 0.9:
             continue
 
         volatility = close.pct_change().std()
@@ -119,6 +123,14 @@ for sym in symbols:
 # =======================
 df = pd.DataFrame(results, columns=["Stock", "Price", "Score"])
 df = df.sort_values(by="Score", ascending=False)
+
+# -----------------------
+# Safety fallback
+# -----------------------
+if df.empty:
+    send_text("⚠️ No stocks passed filters today. Market may be weak or sideways.")
+    print("No candidates today.")
+    exit()
 
 top = df.head(TOP_N)
 
