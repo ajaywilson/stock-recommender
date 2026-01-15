@@ -54,13 +54,12 @@ symbols = [s + ".NS" for s in symbols]
 
 print(f"Scanning {len(symbols)} stocks...")
 
-# Download Nifty index for relative strength
 nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
 
 results = []
 
 # =======================
-# Scan stocks with filters
+# Scan stocks
 # =======================
 for sym in symbols:
     try:
@@ -69,34 +68,8 @@ for sym in symbols:
         if df.empty or len(df) < 70:
             continue
 
-        open_ = df["Open"]
-        high = df["High"]
-        low = df["Low"]
         close = df["Close"]
-        volume = df["Volume"]
 
-        # -------- Trend --------
-        ma20 = close.rolling(20).mean().iloc[-1]
-        ma50 = close.rolling(50).mean().iloc[-1]
-
-        if close.iloc[-1] < ma20:
-            continue
-        if ma20 < ma50:
-            continue
-
-        # -------- Candlestick --------
-        bullish = close.iloc[-1] > open_.iloc[-1]
-        close_strength = (close.iloc[-1] - low.iloc[-1]) / (high.iloc[-1] - low.iloc[-1] + 1e-6)
-
-        if not (bullish or close_strength > 0.6):
-            continue
-
-        # -------- Volume --------
-        avg_vol = volume.rolling(20).mean().iloc[-1]
-        if volume.iloc[-1] < avg_vol:
-            continue
-
-        # -------- Momentum scoring --------
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -115,26 +88,23 @@ for sym in symbols:
 
         exp_return = (0.6 * ret_1m + 0.4 * ret_3m) * 100
 
-        results.append((sym.replace(".NS",""), float(close.iloc[-1]), score, exp_return))
+        results.append((sym.replace(".NS",""), float(close.iloc[-1]), score, exp_return, volatility))
 
     except:
         continue
 
-# =======================
-# Build dataframe
-# =======================
-df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn"])
+df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn","Volatility"])
 df = df.dropna()
 
 if df.empty:
-    send_text("⚠️ No stocks passed filters today.")
+    send_text("⚠️ No valid data today.")
     exit()
 
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Strength labels
+# Strength label
 # =======================
 def label(score):
     if score >= 0.45:
@@ -143,6 +113,66 @@ def label(score):
         return "🟡 Moderate"
     else:
         return "🔴 Weak"
+
+# =======================
+# Risk level (based on volatility)
+# =======================
+def risk_level(vol):
+    if vol < 0.015:
+        return "🟢 Low Risk"
+    elif vol < 0.025:
+        return "🟡 Medium Risk"
+    else:
+        return "🔴 High Risk"
+
+# =======================
+# Price Action Analysis (annotation only)
+# =======================
+signals = {}
+
+for stock in top["Stock"]:
+    try:
+        df2 = yf.download(stock + ".NS", period="2mo", progress=False, threads=False)
+
+        if df2.empty or len(df2) < 30:
+            signals[stock] = "No data (Skip)"
+            continue
+
+        high = df2["High"]
+        low = df2["Low"]
+        close = df2["Close"]
+        open_ = df2["Open"]
+
+        today_close = close.iloc[-1]
+        today_open = open_.iloc[-1]
+        today_high = high.iloc[-1]
+        today_low = low.iloc[-1]
+
+        # --- Breakout ---
+        last_20_high = high.iloc[-21:-1].max()
+        is_breakout = today_close > last_20_high
+
+        # --- Resistance proximity ---
+        last_30_high = high.iloc[-30:].max()
+        near_resistance = today_close > 0.97 * last_30_high
+
+        # --- Candle strength ---
+        bullish = today_close > today_open
+        body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
+        strong_candle = bullish and body_ratio > 0.6
+
+        # --- Guidance ---
+        if is_breakout:
+            signals[stock] = "📈 Breakout (Go for it)"
+        elif near_resistance:
+            signals[stock] = "⚠️ Near Resistance (Wait / Avoid entry)"
+        elif strong_candle:
+            signals[stock] = "🟢 Strong Candle (Consider entry)"
+        else:
+            signals[stock] = "Neutral (No clear edge)"
+
+    except:
+        signals[stock] = "No data (Skip)"
 
 # =======================
 # Telegram message
@@ -154,11 +184,13 @@ for i, row in enumerate(top.itertuples(), 1):
     msg += (
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
         f"Score {round(row.Score,3)} | {label(row.Score)} | "
+        f"Risk: {risk_level(row.Volatility)} | "
         f"Exp 1M: {round(row.ExpReturn,2)}%\n"
+        f"   ➤ Price Action: {signals.get(row.Stock, 'N/A')}\n"
     )
 
 # =======================
-# Allocation (use most capital)
+# Allocation logic
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
@@ -170,14 +202,14 @@ alloc["invested"] = 0.0
 
 remaining = TOTAL_CAPITAL
 
-# First give 1 share each (if possible)
+# First pass: 1 share each
 for i, row in alloc.iterrows():
     if remaining >= row["Price"]:
         alloc.loc[i, "shares"] = 1
         alloc.loc[i, "invested"] = row["Price"]
         remaining -= row["Price"]
 
-# Then keep buying higher ranked stocks greedily
+# Greedy second pass
 alloc = alloc.sort_values(by="Score", ascending=False)
 
 while True:
