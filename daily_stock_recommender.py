@@ -65,7 +65,7 @@ nifty = yf.download("^NSEI", period="6mo", progress=False)["Close"]
 results = []
 
 # =======================
-# Scan all stocks
+# Scan all stocks (NO FILTERING)
 # =======================
 for sym in symbols:
     try:
@@ -77,12 +77,12 @@ for sym in symbols:
         close = df["Close"]
         volume = df["Volume"]
 
+        # Factors
         ret_1m = close.iloc[-1] / close.iloc[-21] - 1
         ret_3m = close.iloc[-1] / close.iloc[-63] - 1
 
         ma20 = close.rolling(20).mean().iloc[-1]
         ma50 = close.rolling(50).mean().iloc[-1]
-
         rsi_val = rsi(close).iloc[-1]
 
         vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
@@ -91,23 +91,10 @@ for sym in symbols:
         rs_stock = close.iloc[-1] / close.iloc[-63]
         rs_index = nifty.iloc[-1] / nifty.iloc[-63]
         rel_strength = rs_stock / rs_index
-        
-        '''
-        # -----------------------
-        # Balanced filters (Option 2)
-        # -----------------------
-        if close.iloc[-1] < ma20 * 0.985:
-            continue # allow price slightly below 20DMA (~1.5%)
-
-        if rsi_val < 35 or rsi_val > 75:
-            continue # wider RSI window
-
-        if vol_ratio < 0.8:
-            continue # allow lower volume but avoid dead stocks
-        '''
 
         volatility = close.pct_change().std()
 
+        # Scoring only (no rejection)
         score = (
             ret_1m * 0.4 +
             ret_3m * 0.3 +
@@ -126,12 +113,9 @@ for sym in symbols:
 df = pd.DataFrame(results, columns=["Stock", "Price", "Score"])
 df = df.sort_values(by="Score", ascending=False)
 
-# -----------------------
-# Safety fallback
-# -----------------------
+# Safety fallback (very rare now)
 if df.empty:
-    send_text("⚠️ No stocks passed filters today. Market may be weak or sideways.")
-    print("No candidates today.")
+    send_text("⚠️ No data available today.")
     exit()
 
 top = df.head(TOP_N)
@@ -143,8 +127,15 @@ today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
 
 for i, row in enumerate(top.itertuples(), 1):
-    strength = "🟢 Strong" if row.Score > 0.25 else "🟡 Moderate"
-    msg += f"{i}. {row.Stock} ₹{round(row.Price,2)} | Score: {round(row.Score,3)} | {strength}\n"
+    # Label strength for readability
+    if row.Score > 0.3:
+        label = "🟢 Strong"
+    elif row.Score > 0.15:
+        label = "🟡 Moderate"
+    else:
+        label = "🔴 Weak"
+
+    msg += f"{i}. {row.Stock} ₹{round(row.Price,2)} | Score: {round(row.Score,3)} | {label}\n"
 
 send_text(msg)
 
@@ -164,5 +155,3 @@ for stock in top.head(3)["Stock"]:
     send_photo(img_path, caption=f"{stock} – 1 Month Chart")
 
 print("Done.")
-
-
