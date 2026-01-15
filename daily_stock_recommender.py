@@ -57,10 +57,10 @@ print(f"Scanning {len(symbols)} stocks...")
 nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
 
 results = []
-stock_data = {}   # Store OHLC data here (single download per stock)
+stock_data = {}
 
 # =======================
-# Scan stocks (single download only)
+# Scan stocks
 # =======================
 for sym in symbols:
     try:
@@ -98,76 +98,58 @@ for sym in symbols:
         continue
 
 df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn","Volatility"])
-df = df.dropna()
-
-if df.empty:
-    send_text("⚠️ No valid data today.")
-    exit()
-
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Strength & Risk labels
+# Labels
 # =======================
 def strength_label(score):
-    if score >= 0.45:
-        return "🟢 Strong"
-    elif score >= 0.30:
-        return "🟡 Moderate"
-    else:
-        return "🔴 Weak"
+    if score >= 0.45: return "🟢 Strong"
+    elif score >= 0.30: return "🟡 Moderate"
+    else: return "🔴 Weak"
 
 def risk_label(vol):
-    if vol < 0.015:
-        return "🟢 Low Risk"
-    elif vol < 0.025:
-        return "🟡 Medium Risk"
-    else:
-        return "🔴 High Risk"
+    if vol < 0.015: return "🟢 Low Risk"
+    elif vol < 0.025: return "🟡 Medium Risk"
+    else: return "🔴 High Risk"
 
 # =======================
-# Price Action Analysis (safe + float fixed)
+# Price Action
 # =======================
 signals = {}
 
 for stock in top["Stock"]:
-    try:
-        df2 = stock_data[stock].tail(25)
+    df2 = stock_data[stock].tail(25)
 
-        high = df2["High"]
-        low = df2["Low"]
-        close = df2["Close"]
-        open_ = df2["Open"]
+    high = df2["High"]
+    low = df2["Low"]
+    close = df2["Close"]
+    open_ = df2["Open"]
 
-        # Force true Python floats (fixes your crash)
-        today_close = float(close.iloc[-1])
-        today_open  = float(open_.iloc[-1])
-        today_high  = float(high.iloc[-1])
-        today_low   = float(low.iloc[-1])
+    today_close = float(close.iloc[-1])
+    today_open  = float(open_.iloc[-1])
+    today_high  = float(high.iloc[-1])
+    today_low   = float(low.iloc[-1])
 
-        recent_high = float(high.iloc[:-1].max())
-        full_high   = float(high.max())
+    recent_high = float(high.iloc[:-1].max())
+    full_high   = float(high.max())
 
-        # Signals
-        is_breakout = today_close > recent_high
-        near_resistance = today_close > 0.97 * full_high
+    is_breakout = today_close > recent_high
+    near_resistance = today_close > 0.97 * full_high
 
-        bullish = today_close > today_open
-        body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
-        strong_candle = bullish and body_ratio > 0.6
+    bullish = today_close > today_open
+    body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
+    strong_candle = bullish and body_ratio > 0.6
 
-        if is_breakout:
-            signals[stock] = "📈 Breakout (Go for it)"
-        elif near_resistance:
-            signals[stock] = "⚠️ Near Resistance (Wait)"
-        elif strong_candle:
-            signals[stock] = "🟢 Strong Candle (Consider entry)"
-        else:
-            signals[stock] = "Neutral"
-
-    except:
-        signals[stock] = "No data"
+    if is_breakout:
+        signals[stock] = "📈 Breakout (Go for it)"
+    elif near_resistance:
+        signals[stock] = "⚠️ Near Resistance (Wait)"
+    elif strong_candle:
+        signals[stock] = "🟢 Strong Candle (Consider entry)"
+    else:
+        signals[stock] = "Neutral"
 
 # =======================
 # Telegram message
@@ -181,32 +163,34 @@ for i, row in enumerate(top.itertuples(), 1):
         f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
         f"Risk: {risk_label(row.Volatility)} | "
         f"Exp 1M: {round(row.ExpReturn,2)}%\n"
-        f"   ➤ Price Action: {signals.get(row.Stock, 'N/A')}\n"
+        f"   ➤ Price Action: {signals[row.Stock]}\n"
     )
 
 # =======================
-# Allocation
+# Allocation respecting price-action
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
-MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
+weights = {
+    "📈 Breakout (Go for it)": 1.3,
+    "🟢 Strong Candle (Consider entry)": 1.1,
+    "Neutral": 1.0,
+    "⚠️ Near Resistance (Wait)": 0.3
+}
 
 alloc = top.copy()
+alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals[s], 0))
+alloc["adj_score"] = alloc["Score"] * alloc["weight"]
+
+alloc = alloc[alloc["weight"] > 0]  # remove bad signals
+alloc = alloc.sort_values(by="adj_score", ascending=False)
+
 alloc["shares"] = 0
 alloc["invested"] = 0.0
-
 remaining = TOTAL_CAPITAL
+MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
 
-# First pass
-for i, row in alloc.iterrows():
-    if remaining >= row["Price"]:
-        alloc.loc[i, "shares"] = 1
-        alloc.loc[i, "invested"] = row["Price"]
-        remaining -= row["Price"]
-
-# Second greedy pass
-alloc = alloc.sort_values(by="Score", ascending=False)
-
+# Buy greedily by adjusted priority
 while True:
     bought = False
     for i, row in alloc.iterrows():
@@ -225,47 +209,5 @@ for row in alloc.itertuples():
 
 msg += f"\nRemaining cash: ₹{int(remaining)}"
 
-# =======================
-# Portfolio expectation
-# =======================
-future_val = 0
-for row in alloc.itertuples():
-    exp_ret = top[top["Stock"] == row.Stock]["ExpReturn"].values[0]
-    future_val += row.invested * (1 + exp_ret / 100)
-
-future_val += remaining
-gain = future_val - TOTAL_CAPITAL
-pct = gain / TOTAL_CAPITAL * 100
-
-msg += (
-    f"\n\n📈 Expected portfolio value after 1 month: ₹{int(future_val)}"
-    f"\n(Expected gain: +₹{int(gain)} / +{round(pct,2)}%)"
-)
-
 send_text(msg)
-
-# =======================
-# Charts for top 3
-# =======================
-for stock in top.head(3)["Stock"]:
-    try:
-        df = stock_data[stock].tail(30)
-
-        plt.figure()
-        plt.plot(df["Close"])
-        plt.title(stock)
-        plt.xlabel("Date")
-        plt.ylabel("Stock Price (₹)")
-        plt.xticks(rotation=90)
-        plt.grid()
-        plt.tight_layout()
-
-        path = f"/tmp/{stock}.png"
-        plt.savefig(path)
-        plt.close()
-
-        send_photo(path, caption=f"{stock} – 1 Month Chart")
-    except:
-        continue
-
 print("Done.")
