@@ -163,10 +163,16 @@ for stock in top.head(3)["Stock"]:
 
         plt.figure()
         plt.plot(df["Close"])
+
         plt.title(stock)
+        plt.ylabel("Stock Price (₹)")
+        plt.xlabel("Date")
+
+        plt.xticks(rotation=90)
+
         plt.grid()
         plt.tight_layout()
-        img_path = f"/tmp/{stock}.png"
+
         plt.savefig(img_path)
         plt.close()
         send_photo(img_path, caption=f"{stock} – 1 Month Chart")
@@ -174,3 +180,4 @@ for stock in top.head(3)["Stock"]:
         continue
 
 print("Done.")
+
