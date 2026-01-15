@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import os
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas_market_calendars as mcal
 import warnings
 
@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore")
 # =======================
 TOP_N = 10
 TOTAL_CAPITAL = 3000
-LOG_FILE = "performance_log.csv"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -65,6 +64,7 @@ results = []
 for sym in symbols:
     try:
         df = yf.download(sym, period="6mo", progress=False, threads=False)
+
         if df.empty or len(df) < 70:
             continue
 
@@ -104,51 +104,72 @@ df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# CALIBRATION (uses history)
-# =======================
-calibration_factor = 1.0
-
-if os.path.exists(LOG_FILE):
-    hist = pd.read_csv(LOG_FILE)
-    past = hist.dropna(subset=["RealizedReturn","ExpReturn"])
-    if len(past) > 10:
-        calibration_factor = past["RealizedReturn"].mean() / past["ExpReturn"].mean()
-
-top["AdjExpReturn"] = top["ExpReturn"] * calibration_factor
-
-# =======================
-# Build message
+# Message with strength labels
 # =======================
 today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
+
+def label(score):
+    if score >= 0.45:
+        return "🟢 Strong"
+    elif score >= 0.30:
+        return "🟡 Moderate"
+    else:
+        return "🔴 Weak"
 
 for i, row in enumerate(top.itertuples(), 1):
     msg += (
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
         f"Score {round(row.Score,3)} | "
-        f"Exp 1M: {round(row.AdjExpReturn,2)}%\n"
+        f"{label(row.Score)} | "
+        f"Exp 1M: {round(row.ExpReturn,2)}%\n"
     )
 
 # =======================
-# Allocation logic
+# Improved allocation logic (aggressive capital usage)
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
-MAX_PER = 0.30 * TOTAL_CAPITAL
-PRICE_LIMIT = 0.60 * TOTAL_CAPITAL
+MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
+PRICE_LIMIT = TOTAL_CAPITAL  # allow any price <= total capital
 
 alloc = top[top["Price"] <= PRICE_LIMIT].copy()
 
-alloc["Score"] = alloc["Score"].clip(lower=0.01)
-alloc["weight"] = alloc["Score"] / alloc["Score"].sum()
-alloc["ideal"] = (alloc["weight"] * TOTAL_CAPITAL).clip(upper=MAX_PER)
+if alloc.empty:
+    msg += "No affordable stocks for current capital."
+    send_text(msg)
+    exit()
 
-alloc["shares"] = (alloc["ideal"] / alloc["Price"]).astype(int)
-alloc["invested"] = alloc["shares"] * alloc["Price"]
+# Initialize 1 share of as many top stocks as possible
+alloc["shares"] = 0
+alloc["invested"] = 0.0
+
+remaining = TOTAL_CAPITAL
+
+# First pass: give 1 share to top-ranked affordable stocks
+for i, row in alloc.iterrows():
+    if remaining >= row["Price"]:
+        alloc.loc[i, "shares"] = 1
+        alloc.loc[i, "invested"] = row["Price"]
+        remaining -= row["Price"]
+
+# Second pass: greedy buying by score until money exhausted
+alloc = alloc.sort_values(by="Score", ascending=False)
+
+while True:
+    bought = False
+    for i, row in alloc.iterrows():
+        if remaining >= row["Price"] and alloc.loc[i, "invested"] + row["Price"] <= MAX_PER_STOCK:
+            alloc.loc[i, "shares"] += 1
+            alloc.loc[i, "invested"] += row["Price"]
+            remaining -= row["Price"]
+            bought = True
+    if not bought:
+        break
+
 alloc = alloc[alloc["shares"] > 0]
 
-remaining = TOTAL_CAPITAL - alloc["invested"].sum()
-
+# Print allocation
 for row in alloc.itertuples():
     msg += f"{row.Stock} – Buy {row.shares} shares (₹{int(row.invested)})\n"
 
@@ -159,37 +180,19 @@ msg += f"\nRemaining cash: ₹{int(remaining)}"
 # =======================
 future_val = 0
 for row in alloc.itertuples():
-    future_val += row.invested * (1 + row.AdjExpReturn / 100)
+    stock_exp = top[top["Stock"] == row.Stock]["ExpReturn"].values[0]
+    future_val += row.invested * (1 + stock_exp / 100)
 
 future_val += remaining
 gain = future_val - TOTAL_CAPITAL
 pct = gain / TOTAL_CAPITAL * 100
 
-msg += f"\n\n📈 Expected portfolio value after 1 month: ₹{int(future_val)}"
-msg += f"\n(Expected gain: +₹{int(gain)} / +{round(pct,2)}%)"
+msg += (
+    f"\n\n📈 Expected portfolio value after 1 month: ₹{int(future_val)}"
+    f"\n(Expected gain: +₹{int(gain)} / +{round(pct,2)}%)"
+)
 
 send_text(msg)
-
-# =======================
-# Save tracking log
-# =======================
-log_rows = []
-for row in top.itertuples():
-    log_rows.append({
-        "Date": today,
-        "Stock": row.Stock,
-        "Price": row.Price,
-        "ExpReturn": row.AdjExpReturn,
-        "RealizedReturn": np.nan
-    })
-
-log_df = pd.DataFrame(log_rows)
-
-if os.path.exists(LOG_FILE):
-    old = pd.read_csv(LOG_FILE)
-    log_df = pd.concat([old, log_df], ignore_index=True)
-
-log_df.to_csv(LOG_FILE, index=False)
 
 # =======================
 # Charts for top 3
