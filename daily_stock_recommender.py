@@ -91,7 +91,8 @@ for sym in symbols:
         rs_stock = close.iloc[-1] / close.iloc[-63]
         rs_index = nifty.iloc[-1] / nifty.iloc[-63]
         rel_strength = rs_stock / rs_index
-
+        
+        '''
         # -----------------------
         # Balanced filters (Option 2)
         # -----------------------
@@ -103,6 +104,7 @@ for sym in symbols:
 
         if vol_ratio < 0.8:
             continue # allow lower volume but avoid dead stocks
+        '''
 
         volatility = close.pct_change().std()
 
@@ -162,4 +164,5 @@ for stock in top.head(3)["Stock"]:
     send_photo(img_path, caption=f"{stock} – 1 Month Chart")
 
 print("Done.")
+
 
