@@ -46,7 +46,7 @@ def send_photo(path, caption=None):
                       data={"chat_id": CHAT_ID, "caption": caption})
 
 # =======================
-# Load Nifty 500
+# Load Nifty 500 universe
 # =======================
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].tolist()
@@ -54,12 +54,13 @@ symbols = [s + ".NS" for s in symbols]
 
 print(f"Scanning {len(symbols)} stocks...")
 
+# Download Nifty index for relative strength
 nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
 
 results = []
 
 # =======================
-# Scan stocks with trend + candlestick + volume confirmation
+# Scan stocks with filters
 # =======================
 for sym in symbols:
     try:
@@ -74,28 +75,28 @@ for sym in symbols:
         close = df["Close"]
         volume = df["Volume"]
 
-        # ---------- Trend ----------
+        # -------- Trend --------
         ma20 = close.rolling(20).mean().iloc[-1]
         ma50 = close.rolling(50).mean().iloc[-1]
 
-        if close.iloc[-1] < ma50:
+        if close.iloc[-1] < ma20:
             continue
         if ma20 < ma50:
             continue
 
-        # ---------- Candlestick ----------
+        # -------- Candlestick --------
         bullish = close.iloc[-1] > open_.iloc[-1]
-        close_near_high = (high.iloc[-1] - close.iloc[-1]) / (high.iloc[-1] - low.iloc[-1] + 1e-6) < 0.3
+        close_strength = (close.iloc[-1] - low.iloc[-1]) / (high.iloc[-1] - low.iloc[-1] + 1e-6)
 
-        if not bullish or not close_near_high:
+        if not (bullish or close_strength > 0.6):
             continue
 
-        # ---------- Volume ----------
+        # -------- Volume --------
         avg_vol = volume.rolling(20).mean().iloc[-1]
-        if volume.iloc[-1] < 1.2 * avg_vol:
+        if volume.iloc[-1] < avg_vol:
             continue
 
-        # ---------- Momentum factors ----------
+        # -------- Momentum scoring --------
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -119,18 +120,21 @@ for sym in symbols:
     except:
         continue
 
+# =======================
+# Build dataframe
+# =======================
 df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn"])
 df = df.dropna()
 
 if df.empty:
-    send_text("⚠️ No stocks passed trend + candlestick + volume filters today.")
+    send_text("⚠️ No stocks passed filters today.")
     exit()
 
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Strength label
+# Strength labels
 # =======================
 def label(score):
     if score >= 0.45:
@@ -141,7 +145,7 @@ def label(score):
         return "🔴 Weak"
 
 # =======================
-# Message
+# Telegram message
 # =======================
 today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
@@ -154,7 +158,7 @@ for i, row in enumerate(top.itertuples(), 1):
     )
 
 # =======================
-# Allocation logic (aggressive use of capital)
+# Allocation (use most capital)
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
@@ -166,14 +170,14 @@ alloc["invested"] = 0.0
 
 remaining = TOTAL_CAPITAL
 
-# First pass: 1 share each
+# First give 1 share each (if possible)
 for i, row in alloc.iterrows():
     if remaining >= row["Price"]:
         alloc.loc[i, "shares"] = 1
         alloc.loc[i, "invested"] = row["Price"]
         remaining -= row["Price"]
 
-# Second pass: greedy buying
+# Then keep buying higher ranked stocks greedily
 alloc = alloc.sort_values(by="Score", ascending=False)
 
 while True:
@@ -195,7 +199,7 @@ for row in alloc.itertuples():
 msg += f"\nRemaining cash: ₹{int(remaining)}"
 
 # =======================
-# Portfolio expected value
+# Portfolio expectation
 # =======================
 future_val = 0
 for row in alloc.itertuples():
