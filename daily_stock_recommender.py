@@ -46,7 +46,7 @@ def send_photo(path, caption=None):
                       data={"chat_id": CHAT_ID, "caption": caption})
 
 # =======================
-# Load Nifty 500 universe
+# Load Nifty 500
 # =======================
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].tolist()
@@ -59,7 +59,7 @@ nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close
 results = []
 
 # =======================
-# Scan stocks
+# Scan stocks (ranking model unchanged)
 # =======================
 for sym in symbols:
     try:
@@ -104,9 +104,9 @@ df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Strength label
+# Strength & risk labels
 # =======================
-def label(score):
+def strength_label(score):
     if score >= 0.45:
         return "🟢 Strong"
     elif score >= 0.30:
@@ -114,10 +114,7 @@ def label(score):
     else:
         return "🔴 Weak"
 
-# =======================
-# Risk level (based on volatility)
-# =======================
-def risk_level(vol):
+def risk_label(vol):
     if vol < 0.015:
         return "🟢 Low Risk"
     elif vol < 0.025:
@@ -126,16 +123,16 @@ def risk_level(vol):
         return "🔴 High Risk"
 
 # =======================
-# Price Action Analysis (annotation only)
+# Price Action Analysis (20-day optimized, annotation only)
 # =======================
 signals = {}
 
 for stock in top["Stock"]:
     try:
-        df2 = yf.download(stock + ".NS", period="2mo", progress=False, threads=False)
+        df2 = yf.download(stock + ".NS", period="1mo", progress=False, threads=False)
 
-        if df2.empty or len(df2) < 30:
-            signals[stock] = "No data (Skip)"
+        if df2.empty or len(df2) < 15:
+            signals[stock] = "Insufficient data"
             continue
 
         high = df2["High"]
@@ -148,31 +145,34 @@ for stock in top["Stock"]:
         today_high = high.iloc[-1]
         today_low = low.iloc[-1]
 
-        # --- Breakout ---
-        last_20_high = high.iloc[-21:-1].max()
-        is_breakout = today_close > last_20_high
+        # Use 20-day logic if available, else fallback to shorter
+        window = min(len(df2) - 1, 20)
 
-        # --- Resistance proximity ---
-        last_30_high = high.iloc[-30:].max()
-        near_resistance = today_close > 0.97 * last_30_high
+        recent_high = high.iloc[-window:].max()
+        prev_high = high.iloc[-window:-1].max()
 
-        # --- Candle strength ---
+        # Breakout
+        is_breakout = today_close > prev_high
+
+        # Near resistance (within 3% of recent high)
+        near_resistance = today_close > 0.97 * recent_high
+
+        # Candle strength
         bullish = today_close > today_open
         body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
         strong_candle = bullish and body_ratio > 0.6
 
-        # --- Guidance ---
         if is_breakout:
             signals[stock] = "📈 Breakout (Go for it)"
         elif near_resistance:
-            signals[stock] = "⚠️ Near Resistance (Wait / Avoid entry)"
+            signals[stock] = "⚠️ Near Resistance (Wait / Avoid fresh entry)"
         elif strong_candle:
             signals[stock] = "🟢 Strong Candle (Consider entry)"
         else:
             signals[stock] = "Neutral (No clear edge)"
 
     except:
-        signals[stock] = "No data (Skip)"
+        signals[stock] = "No data"
 
 # =======================
 # Telegram message
@@ -183,23 +183,21 @@ msg = f"📊 Daily Stock Picks ({today})\n\n"
 for i, row in enumerate(top.itertuples(), 1):
     msg += (
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
-        f"Score {round(row.Score,3)} | {label(row.Score)} | "
-        f"Risk: {risk_level(row.Volatility)} | "
+        f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
+        f"Risk: {risk_label(row.Volatility)} | "
         f"Exp 1M: {round(row.ExpReturn,2)}%\n"
         f"   ➤ Price Action: {signals.get(row.Stock, 'N/A')}\n"
     )
 
 # =======================
-# Allocation logic
+# Allocation
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
 MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
-
 alloc = top.copy()
 alloc["shares"] = 0
 alloc["invested"] = 0.0
-
 remaining = TOTAL_CAPITAL
 
 # First pass: 1 share each
@@ -209,7 +207,7 @@ for i, row in alloc.iterrows():
         alloc.loc[i, "invested"] = row["Price"]
         remaining -= row["Price"]
 
-# Greedy second pass
+# Second pass: greedy
 alloc = alloc.sort_values(by="Score", ascending=False)
 
 while True:
