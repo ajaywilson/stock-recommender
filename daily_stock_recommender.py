@@ -10,18 +10,12 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# =======================
-# CONFIG
-# =======================
 TOP_N = 10
 TOTAL_CAPITAL = 3000
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# =======================
-# Market day check
-# =======================
 def is_trading_day():
     nse = mcal.get_calendar("NSE")
     today = datetime.now().date()
@@ -29,12 +23,8 @@ def is_trading_day():
     return not schedule.empty
 
 if not is_trading_day():
-    print("Market closed today. Exiting.")
     exit()
 
-# =======================
-# Telegram helpers
-# =======================
 def send_text(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
@@ -45,28 +35,28 @@ def send_photo(path, caption=None):
         requests.post(url, files={"photo": img},
                       data={"chat_id": CHAT_ID, "caption": caption})
 
-# =======================
-# Load Nifty 500
-# =======================
+# Universe
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].tolist()
 symbols = [s + ".NS" for s in symbols]
 
-print(f"Scanning {len(symbols)} stocks...")
-
 nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
 
 results = []
+stock_data = {}   # <-- store OHLC here for reuse
 
-# =======================
-# Scan stocks (ranking model unchanged)
-# =======================
+# -----------------------
+# Single download per stock
+# -----------------------
 for sym in symbols:
     try:
         df = yf.download(sym, period="6mo", progress=False, threads=False)
 
         if df.empty or len(df) < 70:
             continue
+
+        stock = sym.replace(".NS", "")
+        stock_data[stock] = df.copy()   # store full data
 
         close = df["Close"]
 
@@ -88,95 +78,68 @@ for sym in symbols:
 
         exp_return = (0.6 * ret_1m + 0.4 * ret_3m) * 100
 
-        results.append((sym.replace(".NS",""), float(close.iloc[-1]), score, exp_return, volatility))
+        results.append((stock, float(close.iloc[-1]), score, exp_return, volatility))
 
     except:
         continue
 
 df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn","Volatility"])
-df = df.dropna()
-
-if df.empty:
-    send_text("⚠️ No valid data today.")
-    exit()
-
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
-# =======================
-# Strength & risk labels
-# =======================
+# -----------------------
+# Labels
+# -----------------------
 def strength_label(score):
-    if score >= 0.45:
-        return "🟢 Strong"
-    elif score >= 0.30:
-        return "🟡 Moderate"
-    else:
-        return "🔴 Weak"
+    if score >= 0.45: return "🟢 Strong"
+    elif score >= 0.30: return "🟡 Moderate"
+    else: return "🔴 Weak"
 
 def risk_label(vol):
-    if vol < 0.015:
-        return "🟢 Low Risk"
-    elif vol < 0.025:
-        return "🟡 Medium Risk"
-    else:
-        return "🔴 High Risk"
+    if vol < 0.015: return "🟢 Low Risk"
+    elif vol < 0.025: return "🟡 Medium Risk"
+    else: return "🔴 High Risk"
 
-# =======================
-# Price Action Analysis (20-day optimized, annotation only)
-# =======================
+# -----------------------
+# Price Action (now reliable)
+# -----------------------
 signals = {}
 
 for stock in top["Stock"]:
-    try:
-        df2 = yf.download(stock + ".NS", period="1mo", progress=False, threads=False)
+    df2 = stock_data[stock].tail(25)   # use last 25 days safely
 
-        if df2.empty or len(df2) < 15:
-            signals[stock] = "Insufficient data"
-            continue
+    high = df2["High"]
+    low = df2["Low"]
+    close = df2["Close"]
+    open_ = df2["Open"]
 
-        high = df2["High"]
-        low = df2["Low"]
-        close = df2["Close"]
-        open_ = df2["Open"]
+    today_close = close.iloc[-1]
+    today_open = open_.iloc[-1]
+    today_high = high.iloc[-1]
+    today_low = low.iloc[-1]
 
-        today_close = close.iloc[-1]
-        today_open = open_.iloc[-1]
-        today_high = high.iloc[-1]
-        today_low = low.iloc[-1]
+    recent_high = high.iloc[:-1].max()
+    full_high = high.max()
 
-        # Use 20-day logic if available, else fallback to shorter
-        window = min(len(df2) - 1, 20)
+    is_breakout = today_close > recent_high
+    near_resistance = today_close > 0.97 * full_high
 
-        recent_high = high.iloc[-window:].max()
-        prev_high = high.iloc[-window:-1].max()
+    bullish = today_close > today_open
+    body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
+    strong_candle = bullish and body_ratio > 0.6
 
-        # Breakout
-        is_breakout = today_close > prev_high
+    if is_breakout:
+        signals[stock] = "📈 Breakout (Go for it)"
+    elif near_resistance:
+        signals[stock] = "⚠️ Near Resistance (Wait)"
+    elif strong_candle:
+        signals[stock] = "🟢 Strong Candle (Consider entry)"
+    else:
+        signals[stock] = "Neutral"
 
-        # Near resistance (within 3% of recent high)
-        near_resistance = today_close > 0.97 * recent_high
-
-        # Candle strength
-        bullish = today_close > today_open
-        body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
-        strong_candle = bullish and body_ratio > 0.6
-
-        if is_breakout:
-            signals[stock] = "📈 Breakout (Go for it)"
-        elif near_resistance:
-            signals[stock] = "⚠️ Near Resistance (Wait / Avoid fresh entry)"
-        elif strong_candle:
-            signals[stock] = "🟢 Strong Candle (Consider entry)"
-        else:
-            signals[stock] = "Neutral (No clear edge)"
-
-    except:
-        signals[stock] = "No data"
-
-# =======================
-# Telegram message
-# =======================
+# -----------------------
+# Message
+# -----------------------
 today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
 
@@ -186,91 +149,9 @@ for i, row in enumerate(top.itertuples(), 1):
         f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
         f"Risk: {risk_label(row.Volatility)} | "
         f"Exp 1M: {round(row.ExpReturn,2)}%\n"
-        f"   ➤ Price Action: {signals.get(row.Stock, 'N/A')}\n"
+        f"   ➤ Price Action: {signals[row.Stock]}\n"
     )
 
-# =======================
-# Allocation
-# =======================
-msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
-
-MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
-alloc = top.copy()
-alloc["shares"] = 0
-alloc["invested"] = 0.0
-remaining = TOTAL_CAPITAL
-
-# First pass: 1 share each
-for i, row in alloc.iterrows():
-    if remaining >= row["Price"]:
-        alloc.loc[i, "shares"] = 1
-        alloc.loc[i, "invested"] = row["Price"]
-        remaining -= row["Price"]
-
-# Second pass: greedy
-alloc = alloc.sort_values(by="Score", ascending=False)
-
-while True:
-    bought = False
-    for i, row in alloc.iterrows():
-        if remaining >= row["Price"] and alloc.loc[i, "invested"] + row["Price"] <= MAX_PER_STOCK:
-            alloc.loc[i, "shares"] += 1
-            alloc.loc[i, "invested"] += row["Price"]
-            remaining -= row["Price"]
-            bought = True
-    if not bought:
-        break
-
-alloc = alloc[alloc["shares"] > 0]
-
-for row in alloc.itertuples():
-    msg += f"{row.Stock} – Buy {row.shares} shares (₹{int(row.invested)})\n"
-
-msg += f"\nRemaining cash: ₹{int(remaining)}"
-
-# =======================
-# Portfolio expectation
-# =======================
-future_val = 0
-for row in alloc.itertuples():
-    exp_ret = top[top["Stock"] == row.Stock]["ExpReturn"].values[0]
-    future_val += row.invested * (1 + exp_ret / 100)
-
-future_val += remaining
-gain = future_val - TOTAL_CAPITAL
-pct = gain / TOTAL_CAPITAL * 100
-
-msg += (
-    f"\n\n📈 Expected portfolio value after 1 month: ₹{int(future_val)}"
-    f"\n(Expected gain: +₹{int(gain)} / +{round(pct,2)}%)"
-)
-
 send_text(msg)
-
-# =======================
-# Charts for top 3
-# =======================
-for stock in top.head(3)["Stock"]:
-    try:
-        df = yf.download(stock + ".NS", period="1mo", progress=False, threads=False)
-        if df.empty:
-            continue
-
-        plt.figure()
-        plt.plot(df["Close"])
-        plt.title(stock)
-        plt.xlabel("Date")
-        plt.ylabel("Stock Price (₹)")
-        plt.xticks(rotation=90)
-        plt.grid()
-        plt.tight_layout()
-
-        path = f"/tmp/{stock}.png"
-        plt.savefig(path)
-        plt.close()
-
-        send_photo(path, caption=f"{stock} – 1 Month Chart")
-    except:
-        continue
 
 print("Done.")
