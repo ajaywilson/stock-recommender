@@ -6,6 +6,9 @@ import os
 import matplotlib.pyplot as plt
 from datetime import datetime
 import pandas_market_calendars as mcal
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # =======================
 # CONFIG
@@ -69,7 +72,7 @@ results = []
 # =======================
 for sym in symbols:
     try:
-        df = yf.download(sym, period="6mo", progress=False)
+        df = yf.download(sym, period="6mo", progress=False, threads=False)
 
         if df.empty or len(df) < 70:
             continue
@@ -78,23 +81,21 @@ for sym in symbols:
         volume = df["Volume"]
 
         # Factors
-        ret_1m = close.iloc[-1] / close.iloc[-21] - 1
-        ret_3m = close.iloc[-1] / close.iloc[-63] - 1
+        ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
+        ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
-        ma20 = close.rolling(20).mean().iloc[-1]
-        ma50 = close.rolling(50).mean().iloc[-1]
-        rsi_val = rsi(close).iloc[-1]
+        rsi_val = float(rsi(close).iloc[-1])
 
-        vol_ratio = volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]
+        vol_ratio = float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1])
 
         # Relative strength vs Nifty
-        rs_stock = close.iloc[-1] / close.iloc[-63]
-        rs_index = nifty.iloc[-1] / nifty.iloc[-63]
-        rel_strength = rs_stock / rs_index
+        rs_stock = float(close.iloc[-1] / close.iloc[-63])
+        rs_index = float(nifty.iloc[-1] / nifty.iloc[-63])
+        rel_strength = float(rs_stock / rs_index)
 
-        volatility = close.pct_change().std()
+        volatility = float(close.pct_change().std())
 
-        # Scoring only (no rejection)
+        # Score (always numeric now)
         score = (
             ret_1m * 0.4 +
             ret_3m * 0.3 +
@@ -102,21 +103,34 @@ for sym in symbols:
             volatility * 0.1
         )
 
-        results.append((sym.replace(".NS", ""), close.iloc[-1], score))
+        results.append((
+            sym.replace(".NS", ""),
+            float(close.iloc[-1]),
+            float(score)
+        ))
 
-    except:
-        continue
+    except Exception as e:
+        continue  # silently skip bad symbols
 
 # =======================
-# Rank stocks
+# Build dataframe safely
 # =======================
 df = pd.DataFrame(results, columns=["Stock", "Price", "Score"])
-df = df.sort_values(by="Score", ascending=False)
 
-# Safety fallback (very rare now)
+# Force numeric types (extra safety)
+df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
+df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+
+# Drop broken rows
+df = df.dropna(subset=["Score", "Price"])
+
 if df.empty:
-    send_text("⚠️ No data available today.")
+    send_text("⚠️ No valid stock data today.")
+    print("No usable data.")
     exit()
+
+# Sort safely
+df = df.sort_values(by="Score", ascending=False)
 
 top = df.head(TOP_N)
 
@@ -127,7 +141,6 @@ today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
 
 for i, row in enumerate(top.itertuples(), 1):
-    # Label strength for readability
     if row.Score > 0.3:
         label = "🟢 Strong"
     elif row.Score > 0.15:
@@ -143,15 +156,21 @@ send_text(msg)
 # Send charts for top 3
 # =======================
 for stock in top.head(3)["Stock"]:
-    df = yf.download(stock + ".NS", period="1mo", progress=False)
-    plt.figure()
-    plt.plot(df["Close"])
-    plt.title(stock)
-    plt.grid()
-    plt.tight_layout()
-    img_path = f"/tmp/{stock}.png"
-    plt.savefig(img_path)
-    plt.close()
-    send_photo(img_path, caption=f"{stock} – 1 Month Chart")
+    try:
+        df = yf.download(stock + ".NS", period="1mo", progress=False, threads=False)
+        if df.empty:
+            continue
+
+        plt.figure()
+        plt.plot(df["Close"])
+        plt.title(stock)
+        plt.grid()
+        plt.tight_layout()
+        img_path = f"/tmp/{stock}.png"
+        plt.savefig(img_path)
+        plt.close()
+        send_photo(img_path, caption=f"{stock} – 1 Month Chart")
+    except:
+        continue
 
 print("Done.")
