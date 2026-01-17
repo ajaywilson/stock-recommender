@@ -39,12 +39,6 @@ def send_text(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
-def send_photo(path, caption=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    with open(path, "rb") as img:
-        requests.post(url, files={"photo": img},
-                      data={"chat_id": CHAT_ID, "caption": caption})
-
 # =======================
 # Load Nifty 500
 # =======================
@@ -114,6 +108,46 @@ def risk_label(vol):
     elif vol < 0.025: return "🟡 Medium Risk"
     else: return "🔴 High Risk"
 
+def holding_period(vol):
+    if vol < 0.015:
+        return "3–6 weeks"
+    elif vol < 0.025:
+        return "1–3 weeks"
+    else:
+        return "3–7 days"
+
+# =======================
+# Exit logic (time critical)
+# =======================
+def exit_signal(df):
+    close = df["Close"]
+    open_ = df["Open"]
+    high = df["High"]
+    low = df["Low"]
+
+    ema10 = close.ewm(span=10).mean()
+    recent_high = high.tail(10).max()
+
+    today_close = close.iloc[-1]
+    today_open = open_.iloc[-1]
+
+    below_ema = today_close < ema10.iloc[-1]
+    trailing_stop = today_close < 0.94 * recent_high
+    body_ratio = abs(today_close - today_open) / (high.iloc[-1] - low.iloc[-1] + 1e-6)
+    bearish_candle = today_close < today_open and body_ratio > 0.6
+    momentum_break = (today_close / close.iloc[-6] - 1) < -0.02
+
+    if below_ema:
+        return "🚨 Exit: Below 10EMA"
+    elif trailing_stop:
+        return "🚨 Exit: Trailing stop hit"
+    elif bearish_candle:
+        return "🚨 Exit: Bearish candle"
+    elif momentum_break:
+        return "🚨 Exit: Momentum breakdown"
+    else:
+        return "✅ Hold"
+
 # =======================
 # Price Action
 # =======================
@@ -123,14 +157,11 @@ for stock in top["Stock"]:
     df2 = stock_data[stock].tail(25)
 
     high = df2["High"]
-    low = df2["Low"]
     close = df2["Close"]
     open_ = df2["Open"]
 
     today_close = float(close.iloc[-1])
     today_open  = float(open_.iloc[-1])
-    today_high  = float(high.iloc[-1])
-    today_low   = float(low.iloc[-1])
 
     recent_high = float(high.iloc[:-1].max())
     full_high   = float(high.max())
@@ -139,7 +170,7 @@ for stock in top["Stock"]:
     near_resistance = today_close > 0.97 * full_high
 
     bullish = today_close > today_open
-    body_ratio = abs(today_close - today_open) / (today_high - today_low + 1e-6)
+    body_ratio = abs(today_close - today_open) / (df2["High"].iloc[-1] - df2["Low"].iloc[-1] + 1e-6)
     strong_candle = bullish and body_ratio > 0.6
 
     if is_breakout:
@@ -158,16 +189,21 @@ today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
 
 for i, row in enumerate(top.itertuples(), 1):
+    df_recent = stock_data[row.Stock].tail(30)
+    exit_msg = exit_signal(df_recent)
+    hold_time = holding_period(row.Volatility)
+
     msg += (
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
         f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
-        f"Risk: {risk_label(row.Volatility)} | "
-        f"Exp 1M: {round(row.ExpReturn,2)}%\n"
+        f"Risk: {risk_label(row.Volatility)}\n"
         f"   ➤ Price Action: {signals[row.Stock]}\n"
+        f"   ➤ Holding Period: {hold_time}\n"
+        f"   ➤ Exit Signal: {exit_msg}\n\n"
     )
 
 # =======================
-# Allocation respecting price-action
+# Allocation
 # =======================
 msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
 
@@ -182,7 +218,7 @@ alloc = top.copy()
 alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals[s], 0))
 alloc["adj_score"] = alloc["Score"] * alloc["weight"]
 
-alloc = alloc[alloc["weight"] > 0]  # remove bad signals
+alloc = alloc[alloc["weight"] > 0]
 alloc = alloc.sort_values(by="adj_score", ascending=False)
 
 alloc["shares"] = 0
@@ -190,7 +226,6 @@ alloc["invested"] = 0.0
 remaining = TOTAL_CAPITAL
 MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
 
-# Buy greedily by adjusted priority
 while True:
     bought = False
     for i, row in alloc.iterrows():
