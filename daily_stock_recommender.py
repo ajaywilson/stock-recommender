@@ -43,8 +43,8 @@ def send_text(msg):
 # Load Nifty 500
 # =======================
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-symbols = pd.read_csv(url)["Symbol"].tolist()
-symbols = [s + ".NS" for s in symbols]
+symbols = pd.read_csv(url)["Symbol"].dropna().unique().tolist()
+symbols = [s.strip() + ".NS" for s in symbols if isinstance(s, str)]
 
 print(f"Scanning {len(symbols)} stocks...")
 
@@ -60,7 +60,11 @@ for sym in symbols:
     try:
         df = yf.download(sym, period="6mo", progress=False, threads=False)
 
-        if df.empty or len(df) < 70:
+        if df is None or df.empty or len(df) < 70:
+            continue
+
+        df = df.dropna()
+        if len(df) < 70:
             continue
 
         stock = sym.replace(".NS", "")
@@ -88,10 +92,10 @@ for sym in symbols:
 
         results.append((stock, float(close.iloc[-1]), score, exp_return, volatility))
 
-    except:
+    except Exception:
         continue
 
-df = pd.DataFrame(results, columns=["Stock","Price","Score","ExpReturn","Volatility"])
+df = pd.DataFrame(results, columns=["Stock", "Price", "Score", "ExpReturn", "Volatility"])
 df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
@@ -117,7 +121,7 @@ def holding_period(vol):
         return "3–7 days"
 
 # =======================
-# Exit logic (time critical)
+# Exit logic
 # =======================
 def exit_signal(df):
     close = df["Close"]
@@ -128,14 +132,16 @@ def exit_signal(df):
     ema10 = close.ewm(span=10).mean()
     recent_high = high.tail(10).max()
 
-    today_close = close.iloc[-1]
-    today_open = open_.iloc[-1]
+    today_close = float(close.iloc[-1])
+    today_open = float(open_.iloc[-1])
 
-    below_ema = today_close < ema10.iloc[-1]
-    trailing_stop = today_close < 0.94 * recent_high
-    body_ratio = abs(today_close - today_open) / (high.iloc[-1] - low.iloc[-1] + 1e-6)
+    below_ema = today_close < float(ema10.iloc[-1])
+    trailing_stop = today_close < 0.94 * float(recent_high)
+
+    body_ratio = abs(today_close - today_open) / (float(high.iloc[-1]) - float(low.iloc[-1]) + 1e-6)
     bearish_candle = today_close < today_open and body_ratio > 0.6
-    momentum_break = (today_close / close.iloc[-6] - 1) < -0.02
+
+    momentum_break = (today_close / float(close.iloc[-6]) - 1) < -0.02
 
     if below_ema:
         return "🚨 Exit: Below 10EMA"
@@ -154,24 +160,34 @@ def exit_signal(df):
 signals = {}
 
 for stock in top["Stock"]:
+    if stock not in stock_data:
+        continue
+
     df2 = stock_data[stock].tail(25)
+
+    if df2.empty or len(df2) < 5:
+        continue
 
     high = df2["High"]
     close = df2["Close"]
     open_ = df2["Open"]
 
     today_close = float(close.iloc[-1])
-    today_open  = float(open_.iloc[-1])
+    today_open = float(open_.iloc[-1])
 
     recent_high = float(high.iloc[:-1].max())
-    full_high   = float(high.max())
+    full_high = float(high.max())
 
     is_breakout = today_close > recent_high
     near_resistance = today_close > 0.97 * full_high
 
     bullish = today_close > today_open
-    body_ratio = abs(today_close - today_open) / (df2["High"].iloc[-1] - df2["Low"].iloc[-1] + 1e-6)
-    strong_candle = bullish and body_ratio > 0.6
+
+    high_last = float(df2["High"].iloc[-1])
+    low_last = float(df2["Low"].iloc[-1])
+
+    body_ratio = abs(today_close - today_open) / (high_last - low_last + 1e-6)
+    strong_candle = bool(bullish and body_ratio > 0.6)
 
     if is_breakout:
         signals[stock] = "📈 Breakout (Go for it)"
@@ -189,6 +205,9 @@ today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
 
 for i, row in enumerate(top.itertuples(), 1):
+    if row.Stock not in stock_data:
+        continue
+
     df_recent = stock_data[row.Stock].tail(30)
     exit_msg = exit_signal(df_recent)
     hold_time = holding_period(row.Volatility)
@@ -197,7 +216,7 @@ for i, row in enumerate(top.itertuples(), 1):
         f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
         f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
         f"Risk: {risk_label(row.Volatility)}\n"
-        f"   ➤ Price Action: {signals[row.Stock]}\n"
+        f"   ➤ Price Action: {signals.get(row.Stock, 'Neutral')}\n"
         f"   ➤ Holding Period: {hold_time}\n"
         f"   ➤ Exit Signal: {exit_msg}\n\n"
     )
@@ -215,7 +234,7 @@ weights = {
 }
 
 alloc = top.copy()
-alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals[s], 0))
+alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals.get(s, "Neutral"), 0))
 alloc["adj_score"] = alloc["Score"] * alloc["weight"]
 
 alloc = alloc[alloc["weight"] > 0]
