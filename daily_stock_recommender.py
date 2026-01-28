@@ -33,19 +33,24 @@ print(f"📁 Portfolio file located at: {PORTFOLIO_FILE}")
 # =======================
 def load_portfolio():
     if not os.path.exists(PORTFOLIO_FILE):
-        return {}
+        return {"_meta": {"cash": TOTAL_CAPITAL}}
+
     try:
         with open(PORTFOLIO_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+            if "_meta" not in data:
+                data["_meta"] = {"cash": TOTAL_CAPITAL}
+            return data
     except json.JSONDecodeError:
-        print("⚠️ portfolio.json corrupted. Resetting.")
-        return {}
+        print("⚠️ Corrupted JSON. Resetting portfolio.")
+        return {"_meta": {"cash": TOTAL_CAPITAL}}
 
 def save_portfolio(p):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(p, f, indent=2)
 
 portfolio = load_portfolio()
+cash_available = portfolio["_meta"]["cash"]
 
 # =======================
 # Market day check
@@ -56,7 +61,7 @@ def is_trading_day():
     schedule = nse.schedule(start_date=today, end_date=today)
     return not schedule.empty
 
-# Comment this temporarily if testing on weekend
+# Comment this while testing on weekends
 # if not is_trading_day():
 #     print("Market closed today. Exiting.")
 #     exit()
@@ -69,7 +74,7 @@ def send_text(msg):
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # =======================
-# Load Nifty 500
+# Load symbols
 # =======================
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].dropna().unique().tolist()
@@ -77,7 +82,7 @@ symbols = [s.strip() + ".NS" for s in symbols if isinstance(s, str)]
 
 print(f"Scanning {len(symbols)} stocks...")
 
-nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
+nifty = yf.download("^NSEI", period="6mo", progress=False)["Close"]
 
 results = []
 stock_data = {}
@@ -87,8 +92,7 @@ stock_data = {}
 # =======================
 for sym in symbols:
     try:
-        df = yf.download(sym, period="6mo", progress=False, threads=False)
-
+        df = yf.download(sym, period="6mo", progress=False)
         if df is None or df.empty or len(df) < 70:
             continue
 
@@ -100,7 +104,6 @@ for sym in symbols:
         stock_data[stock] = df.copy()
 
         close = df["Close"]
-
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -118,7 +121,6 @@ for sym in symbols:
         )
 
         exp_return = (0.6 * ret_1m + 0.4 * ret_3m) * 100
-
         results.append((stock, float(close.iloc[-1]), score, exp_return, volatility))
 
     except Exception:
@@ -184,55 +186,12 @@ def exit_signal(df):
         return "✅ Hold"
 
 # =======================
-# Price Action
-# =======================
-signals = {}
-
-for stock in top["Stock"]:
-    if stock not in stock_data:
-        continue
-
-    df2 = stock_data[stock].tail(25)
-
-    if df2.empty or len(df2) < 5:
-        continue
-
-    high = df2["High"]
-    close = df2["Close"]
-    open_ = df2["Open"]
-
-    today_close = float(close.iloc[-1])
-    today_open = float(open_.iloc[-1])
-
-    recent_high = float(high.iloc[:-1].max())
-    full_high = float(high.max())
-
-    is_breakout = today_close > recent_high
-    near_resistance = today_close > 0.97 * full_high
-
-    bullish = today_close > today_open
-
-    high_last = float(df2["High"].iloc[-1])
-    low_last = float(df2["Low"].iloc[-1])
-
-    body_ratio = abs(today_close - today_open) / (high_last - low_last + 1e-6)
-    strong_candle = bool(bullish and body_ratio > 0.6)
-
-    if is_breakout:
-        signals[stock] = "📈 Breakout (Go for it)"
-    elif near_resistance:
-        signals[stock] = "⚠️ Near Resistance (Wait)"
-    elif strong_candle:
-        signals[stock] = "🟢 Strong Candle (Consider entry)"
-    else:
-        signals[stock] = "Neutral"
-
-# =======================
-# SELL based on portfolio
+# SELL evaluation (real holdings)
 # =======================
 sell_list = []
-
 for stock in list(portfolio.keys()):
+    if stock == "_meta":
+        continue
     if stock not in stock_data:
         continue
 
@@ -240,36 +199,18 @@ for stock in list(portfolio.keys()):
     exit_msg = exit_signal(df_recent)
 
     if "🚨 Exit" in exit_msg:
+        shares = portfolio[stock]["shares"]
+        price = float(stock_data[stock]["Close"].iloc[-1])
+        cash_available += shares * price
         sell_list.append((stock, exit_msg))
         portfolio.pop(stock, None)
 
-# =======================
-# Telegram message
-# =======================
-today = datetime.now().strftime("%Y-%m-%d")
-msg = f"📊 Daily Stock Picks ({today})\n\n"
-
-for i, row in enumerate(top.itertuples(), 1):
-    if row.Stock not in stock_data:
-        continue
-
-    df_recent = stock_data[row.Stock].tail(30)
-    exit_msg = exit_signal(df_recent)
-    hold_time = holding_period(row.Volatility)
-
-    msg += (
-        f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
-        f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
-        f"Risk: {risk_label(row.Volatility)}\n"
-        f"   ➤ Price Action: {signals.get(row.Stock, 'Neutral')}\n"
-        f"   ➤ Holding Period: {hold_time}\n"
-        f"   ➤ Exit Signal: {exit_msg}\n\n"
-    )
+portfolio["_meta"]["cash"] = round(cash_available, 2)
 
 # =======================
-# Allocation (unchanged)
+# Allocation using remaining cash
 # =======================
-msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
+remaining = cash_available
 
 weights = {
     "📈 Breakout (Go for it)": 1.3,
@@ -278,22 +219,20 @@ weights = {
     "⚠️ Near Resistance (Wait)": 0.3
 }
 
+signals = {row.Stock: "Neutral" for row in top.itertuples()}
+
 alloc = top.copy()
 alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals.get(s, "Neutral"), 0))
 alloc["adj_score"] = alloc["Score"] * alloc["weight"]
-
-alloc = alloc[alloc["weight"] > 0]
 alloc = alloc.sort_values(by="adj_score", ascending=False)
 
 alloc["shares"] = 0
 alloc["invested"] = 0.0
-remaining = TOTAL_CAPITAL
-MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
 
 while True:
     bought = False
     for i, row in alloc.iterrows():
-        if remaining >= row["Price"] and alloc.loc[i, "invested"] + row["Price"] <= MAX_PER_STOCK:
+        if remaining >= row["Price"]:
             alloc.loc[i, "shares"] += 1
             alloc.loc[i, "invested"] += row["Price"]
             remaining -= row["Price"]
@@ -303,46 +242,17 @@ while True:
 
 alloc = alloc[alloc["shares"] > 0]
 
+# Update portfolio
+today = datetime.now().strftime("%Y-%m-%d")
+
 for row in alloc.itertuples():
-    msg += f"{row.Stock} – Buy {row.shares} shares (₹{int(row.invested)})\n"
     portfolio[row.Stock] = {
         "shares": int(row.shares),
         "price": float(row.Price),
         "date": today
     }
 
-msg += f"\nRemaining cash: ₹{int(remaining)}"
-
-# =======================
-# Buy/Sell Summary
-# =======================
-msg += "\n\n📌 TRADE SUMMARY FOR NEXT SESSION\n"
-
-if sell_list:
-    msg += "\n📤 SELL TOMORROW\n"
-    for stock, reason in sell_list:
-        msg += f"{stock} – {reason}\n"
-else:
-    msg += "\n📤 SELL TOMORROW\nNone ✅\n"
-
-if not alloc.empty:
-    msg += "\n📥 BUY TOMORROW\n"
-    for row in alloc.itertuples():
-        msg += f"{row.Stock} – Buy {row.shares} shares (~₹{int(row.invested)})\n"
-else:
-    msg += "\n📥 BUY TOMORROW\nNo fresh buys today\n"
-
-# =======================
-# Current portfolio
-# =======================
-msg += "\n📦 CURRENT BOT PORTFOLIO\n"
-if portfolio:
-    for s, info in portfolio.items():
-        msg += f"{s}: {info['shares']} shares @ ₹{info['price']} ({info['date']})\n"
-else:
-    msg += "Empty\n"
-
+portfolio["_meta"]["cash"] = round(remaining, 2)
 save_portfolio(portfolio)
 
-send_text(msg)
-print("Done.")
+print("Done. Portfolio and capital updated.")
