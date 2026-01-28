@@ -26,3 +26,16 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+
+      # ✅ NEW STEP: Commit portfolio.json back to repo
+      - name: Commit updated portfolio.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add portfolio.json
+
+          # Only commit if there are changes
+          git diff --cached --quiet || git commit -m "Update portfolio.json [bot]"
+
+          git push
