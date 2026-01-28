@@ -16,10 +16,17 @@ warnings.filterwarnings("ignore")
 # =======================
 TOP_N = 10
 TOTAL_CAPITAL = 3000
-PORTFOLIO_FILE = "portfolio.json"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# =======================
+# JSON always next to script
+# =======================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio.json")
+
+print(f"📁 Portfolio file located at: {PORTFOLIO_FILE}")
 
 # =======================
 # Portfolio helpers
@@ -27,8 +34,12 @@ CHAT_ID = os.getenv("CHAT_ID")
 def load_portfolio():
     if not os.path.exists(PORTFOLIO_FILE):
         return {}
-    with open(PORTFOLIO_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(PORTFOLIO_FILE, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print("⚠️ portfolio.json corrupted. Resetting.")
+        return {}
 
 def save_portfolio(p):
     with open(PORTFOLIO_FILE, "w") as f:
@@ -45,9 +56,10 @@ def is_trading_day():
     schedule = nse.schedule(start_date=today, end_date=today)
     return not schedule.empty
 
-if not is_trading_day():
-    print("Market closed today. Exiting.")
-    exit()
+# Comment this temporarily if testing on weekend
+# if not is_trading_day():
+#     print("Market closed today. Exiting.")
+#     exit()
 
 # =======================
 # Telegram helpers
@@ -63,7 +75,9 @@ url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].dropna().unique().tolist()
 symbols = [s.strip() + ".NS" for s in symbols if isinstance(s, str)]
 
-nifty = yf.download("^NSEI", period="6mo", progress=False)["Close"]
+print(f"Scanning {len(symbols)} stocks...")
+
+nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
 
 results = []
 stock_data = {}
@@ -73,7 +87,8 @@ stock_data = {}
 # =======================
 for sym in symbols:
     try:
-        df = yf.download(sym, period="6mo", progress=False)
+        df = yf.download(sym, period="6mo", progress=False, threads=False)
+
         if df is None or df.empty or len(df) < 70:
             continue
 
@@ -85,6 +100,7 @@ for sym in symbols:
         stock_data[stock] = df.copy()
 
         close = df["Close"]
+
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -177,6 +193,7 @@ for stock in top["Stock"]:
         continue
 
     df2 = stock_data[stock].tail(25)
+
     if df2.empty or len(df2) < 5:
         continue
 
@@ -218,14 +235,16 @@ sell_list = []
 for stock in list(portfolio.keys()):
     if stock not in stock_data:
         continue
+
     df_recent = stock_data[stock].tail(30)
     exit_msg = exit_signal(df_recent)
+
     if "🚨 Exit" in exit_msg:
         sell_list.append((stock, exit_msg))
         portfolio.pop(stock, None)
 
 # =======================
-# Telegram main output
+# Telegram message
 # =======================
 today = datetime.now().strftime("%Y-%m-%d")
 msg = f"📊 Daily Stock Picks ({today})\n\n"
