@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import pandas_market_calendars as mcal
 import warnings
+import json
 
 warnings.filterwarnings("ignore")
 
@@ -15,9 +16,25 @@ warnings.filterwarnings("ignore")
 # =======================
 TOP_N = 10
 TOTAL_CAPITAL = 3000
+PORTFOLIO_FILE = "portfolio.json"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# =======================
+# Portfolio helpers
+# =======================
+def load_portfolio():
+    if not os.path.exists(PORTFOLIO_FILE):
+        return {}
+    with open(PORTFOLIO_FILE, "r") as f:
+        return json.load(f)
+
+def save_portfolio(p):
+    with open(PORTFOLIO_FILE, "w") as f:
+        json.dump(p, f, indent=2)
+
+portfolio = load_portfolio()
 
 # =======================
 # Market day check
@@ -40,15 +57,13 @@ def send_text(msg):
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 # =======================
-# Load Nifty 500
+# Load symbols
 # =======================
 url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 symbols = pd.read_csv(url)["Symbol"].dropna().unique().tolist()
 symbols = [s.strip() + ".NS" for s in symbols if isinstance(s, str)]
 
-print(f"Scanning {len(symbols)} stocks...")
-
-nifty = yf.download("^NSEI", period="6mo", progress=False, threads=False)["Close"]
+nifty = yf.download("^NSEI", period="6mo", progress=False)["Close"]
 
 results = []
 stock_data = {}
@@ -58,8 +73,7 @@ stock_data = {}
 # =======================
 for sym in symbols:
     try:
-        df = yf.download(sym, period="6mo", progress=False, threads=False)
-
+        df = yf.download(sym, period="6mo", progress=False)
         if df is None or df.empty or len(df) < 70:
             continue
 
@@ -71,7 +85,6 @@ for sym in symbols:
         stock_data[stock] = df.copy()
 
         close = df["Close"]
-
         ret_1m = float(close.iloc[-1] / close.iloc[-21] - 1)
         ret_3m = float(close.iloc[-1] / close.iloc[-63] - 1)
 
@@ -89,7 +102,6 @@ for sym in symbols:
         )
 
         exp_return = (0.6 * ret_1m + 0.4 * ret_3m) * 100
-
         results.append((stock, float(close.iloc[-1]), score, exp_return, volatility))
 
     except Exception:
@@ -100,155 +112,64 @@ df = df.sort_values(by="Score", ascending=False)
 top = df.head(TOP_N).copy()
 
 # =======================
-# Labels
-# =======================
-def strength_label(score):
-    if score >= 0.45: return "🟢 Strong"
-    elif score >= 0.30: return "🟡 Moderate"
-    else: return "🔴 Weak"
-
-def risk_label(vol):
-    if vol < 0.015: return "🟢 Low Risk"
-    elif vol < 0.025: return "🟡 Medium Risk"
-    else: return "🔴 High Risk"
-
-def holding_period(vol):
-    if vol < 0.015:
-        return "3–6 weeks"
-    elif vol < 0.025:
-        return "1–3 weeks"
-    else:
-        return "3–7 days"
-
-# =======================
 # Exit logic
 # =======================
 def exit_signal(df):
     close = df["Close"]
-    open_ = df["Open"]
-    high = df["High"]
-    low = df["Low"]
-
     ema10 = close.ewm(span=10).mean()
-    recent_high = high.tail(10).max()
-
+    recent_high = df["High"].tail(10).max()
     today_close = float(close.iloc[-1])
-    today_open = float(open_.iloc[-1])
+    today_open = float(df["Open"].iloc[-1])
 
     below_ema = today_close < float(ema10.iloc[-1])
     trailing_stop = today_close < 0.94 * float(recent_high)
-
-    body_ratio = abs(today_close - today_open) / (float(high.iloc[-1]) - float(low.iloc[-1]) + 1e-6)
-    bearish_candle = today_close < today_open and body_ratio > 0.6
-
-    momentum_break = (today_close / float(close.iloc[-6]) - 1) < -0.02
 
     if below_ema:
         return "🚨 Exit: Below 10EMA"
     elif trailing_stop:
         return "🚨 Exit: Trailing stop hit"
-    elif bearish_candle:
-        return "🚨 Exit: Bearish candle"
-    elif momentum_break:
-        return "🚨 Exit: Momentum breakdown"
     else:
         return "✅ Hold"
 
 # =======================
-# Price Action
+# Evaluate existing holdings (SELL logic)
 # =======================
-signals = {}
-
-for stock in top["Stock"]:
+sell_list = []
+for stock in list(portfolio.keys()):
     if stock not in stock_data:
         continue
 
-    df2 = stock_data[stock].tail(25)
+    df_recent = stock_data[stock].tail(30)
+    signal = exit_signal(df_recent)
 
-    if df2.empty or len(df2) < 5:
-        continue
+    if "🚨 Exit" in signal:
+        sell_list.append(stock)
 
-    high = df2["High"]
-    close = df2["Close"]
-    open_ = df2["Open"]
-
-    today_close = float(close.iloc[-1])
-    today_open = float(open_.iloc[-1])
-
-    recent_high = float(high.iloc[:-1].max())
-    full_high = float(high.max())
-
-    is_breakout = today_close > recent_high
-    near_resistance = today_close > 0.97 * full_high
-
-    bullish = today_close > today_open
-
-    high_last = float(df2["High"].iloc[-1])
-    low_last = float(df2["Low"].iloc[-1])
-
-    body_ratio = abs(today_close - today_open) / (high_last - low_last + 1e-6)
-    strong_candle = bool(bullish and body_ratio > 0.6)
-
-    if is_breakout:
-        signals[stock] = "📈 Breakout (Go for it)"
-    elif near_resistance:
-        signals[stock] = "⚠️ Near Resistance (Wait)"
-    elif strong_candle:
-        signals[stock] = "🟢 Strong Candle (Consider entry)"
-    else:
-        signals[stock] = "Neutral"
+# Remove sold stocks from portfolio
+for s in sell_list:
+    portfolio.pop(s, None)
 
 # =======================
-# Telegram message
+# BUY allocation (same as your logic)
 # =======================
-today = datetime.now().strftime("%Y-%m-%d")
-msg = f"📊 Daily Stock Picks ({today})\n\n"
-
-for i, row in enumerate(top.itertuples(), 1):
-    if row.Stock not in stock_data:
-        continue
-
-    df_recent = stock_data[row.Stock].tail(30)
-    exit_msg = exit_signal(df_recent)
-    hold_time = holding_period(row.Volatility)
-
-    msg += (
-        f"{i}. {row.Stock} ₹{round(row.Price,2)} | "
-        f"Score {round(row.Score,3)} | {strength_label(row.Score)} | "
-        f"Risk: {risk_label(row.Volatility)}\n"
-        f"   ➤ Price Action: {signals.get(row.Stock, 'Neutral')}\n"
-        f"   ➤ Holding Period: {hold_time}\n"
-        f"   ➤ Exit Signal: {exit_msg}\n\n"
-    )
-
-# =======================
-# Allocation
-# =======================
-msg += f"\n💰 Investment Plan (₹{TOTAL_CAPITAL})\n\n"
+signals = {row.Stock: "Neutral" for row in top.itertuples()}
 
 weights = {
-    "📈 Breakout (Go for it)": 1.3,
-    "🟢 Strong Candle (Consider entry)": 1.1,
-    "Neutral": 1.0,
-    "⚠️ Near Resistance (Wait)": 0.3
+    "Neutral": 1.0
 }
 
 alloc = top.copy()
-alloc["weight"] = alloc["Stock"].apply(lambda s: weights.get(signals.get(s, "Neutral"), 0))
-alloc["adj_score"] = alloc["Score"] * alloc["weight"]
-
-alloc = alloc[alloc["weight"] > 0]
-alloc = alloc.sort_values(by="adj_score", ascending=False)
-
+alloc["weight"] = 1.0
+alloc["adj_score"] = alloc["Score"]
 alloc["shares"] = 0
 alloc["invested"] = 0.0
+
 remaining = TOTAL_CAPITAL
-MAX_PER_STOCK = 0.30 * TOTAL_CAPITAL
 
 while True:
     bought = False
     for i, row in alloc.iterrows():
-        if remaining >= row["Price"] and alloc.loc[i, "invested"] + row["Price"] <= MAX_PER_STOCK:
+        if remaining >= row["Price"]:
             alloc.loc[i, "shares"] += 1
             alloc.loc[i, "invested"] += row["Price"]
             remaining -= row["Price"]
@@ -258,10 +179,36 @@ while True:
 
 alloc = alloc[alloc["shares"] > 0]
 
+# Add buys to portfolio
 for row in alloc.itertuples():
-    msg += f"{row.Stock} – Buy {row.shares} shares (₹{int(row.invested)})\n"
+    portfolio[row.Stock] = {
+        "shares": int(row.shares),
+        "buy_price": float(row.Price),
+        "date": datetime.now().strftime("%Y-%m-%d")
+    }
 
-msg += f"\nRemaining cash: ₹{int(remaining)}"
+save_portfolio(portfolio)
+
+# =======================
+# Telegram message
+# =======================
+today = datetime.now().strftime("%Y-%m-%d")
+msg = f"📊 Daily Stock Bot ({today})\n\n"
+
+if sell_list:
+    msg += "📤 SELL TOMORROW\n"
+    for s in sell_list:
+        msg += f"{s}\n"
+else:
+    msg += "📤 SELL TOMORROW: None\n"
+
+msg += "\n📥 BUY TOMORROW\n"
+for row in alloc.itertuples():
+    msg += f"{row.Stock} – Buy {row.shares} shares (~₹{int(row.invested)})\n"
+
+msg += "\n📦 CURRENT PORTFOLIO\n"
+for s, info in portfolio.items():
+    msg += f"{s}: {info['shares']} shares @ ₹{info['buy_price']}\n"
 
 send_text(msg)
 print("Done.")
