@@ -2,29 +2,29 @@
   "_meta": {
     "cash": 24.65
   },
-  "NATIONALUM": {
-    "shares": 1,
-    "price": 406.1499938964844,
-    "date": "2026-01-28"
-  },
-  "HINDCOPPER": {
-    "shares": 1,
-    "price": 633.4000244140625,
-    "date": "2026-01-28"
-  },
-  "VEDL": {
-    "shares": 1,
-    "price": 737.0999755859375,
-    "date": "2026-01-28"
-  },
-  "HINDZINC": {
-    "shares": 1,
-    "price": 708.2000122070312,
-    "date": "2026-01-28"
-  },
   "OIL": {
     "shares": 1,
     "price": 490.5,
     "date": "2026-01-28"
+  },
+  "HINDCOPPER": {
+    "shares": 1,
+    "price": 685.9000244140625,
+    "date": "2026-01-30"
+  },
+  "NATIONALUM": {
+    "shares": 1,
+    "price": 385.45001220703125,
+    "date": "2026-01-30"
+  },
+  "VEDL": {
+    "shares": 1,
+    "price": 681.5499877929688,
+    "date": "2026-01-30"
+  },
+  "HINDZINC": {
+    "shares": 1,
+    "price": 628.5,
+    "date": "2026-01-30"
   }
 }
