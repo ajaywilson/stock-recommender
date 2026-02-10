@@ -1,20 +1,15 @@
 {
   "_meta": {
-    "cash": 55.6
+    "cash": 74.77
   },
   "ASHOKLEY": {
     "shares": 1,
-    "price": 205.8000030517578,
-    "date": "2026-02-09"
+    "price": 209.72999572753906,
+    "date": "2026-02-10"
   },
   "KARURVYSYA": {
     "shares": 1,
     "price": 326.54998779296875,
-    "date": "2026-02-09"
-  },
-  "HINDCOPPER": {
-    "shares": 1,
-    "price": 598.0,
     "date": "2026-02-09"
   },
   "IFCI": {
@@ -26,5 +21,10 @@
     "shares": 1,
     "price": 194.25,
     "date": "2026-02-09"
+  },
+  "NATIONALUM": {
+    "shares": 1,
+    "price": 368.6499938964844,
+    "date": "2026-02-10"
   }
 }
