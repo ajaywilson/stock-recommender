@@ -2,14 +2,14 @@
   "_meta": {
     "cash": 56.59
   },
-  "HINDCOPPER": {
-    "shares": 1,
-    "price": 591.6500244140625,
-    "date": "2026-02-15"
-  },
   "ASHOKLEY": {
     "shares": 2,
     "price": 204.6300048828125,
     "date": "2026-02-15"
+  },
+  "HINDCOPPER": {
+    "shares": 1,
+    "price": 574.4000244140625,
+    "date": "2026-02-16"
   }
 }
