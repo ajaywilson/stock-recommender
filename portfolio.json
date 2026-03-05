@@ -1,15 +1,15 @@
 {
   "_meta": {
-    "cash": 101.11
-  },
-  "HINDCOPPER": {
-    "shares": 1,
-    "price": 546.7999877929688,
-    "date": "2026-03-04"
+    "cash": 78.13
   },
   "NATIONALUM": {
     "shares": 1,
-    "price": 373.5,
-    "date": "2026-03-04"
+    "price": 395.95001220703125,
+    "date": "2026-03-05"
+  },
+  "BANDHANBNK": {
+    "shares": 1,
+    "price": 185.02999877929688,
+    "date": "2026-03-05"
   }
 }
