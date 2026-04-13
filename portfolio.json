@@ -1,15 +1,15 @@
 {
   "_meta": {
-    "cash": 36.17
+    "cash": 26.71
   },
   "ADANIPOWER": {
     "shares": 1,
     "price": 169.30999755859375,
     "date": "2026-04-08"
   },
-  "OLAELEC": {
-    "shares": 2,
-    "price": 40.880001068115234,
-    "date": "2026-04-10"
+  "HFCL": {
+    "shares": 1,
+    "price": 86.0,
+    "date": "2026-04-13"
   }
 }
